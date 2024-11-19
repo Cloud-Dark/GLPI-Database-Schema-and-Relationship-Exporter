@@ -1,7 +1,6 @@
 const mysql = require('mysql2');
 const fs = require('fs');
 
-
 const connection = mysql.createConnection({
     host: 'your-database-host',
     user: 'your-database-username',
@@ -9,6 +8,7 @@ const connection = mysql.createConnection({
     database: 'your-database-name',
 });
 
+// Output file paths
 const files = {
     tableNames: './table.txt',
     tableStructure: './structure.txt',
@@ -49,20 +49,56 @@ connection.connect(err => {
         });
     };
 
-    // Write file helper
-    const writeToFile = (filePath, content) => {
-        fs.writeFileSync(filePath, content, 'utf8');
-        console.log(`File generated: ${filePath}`);
+    // Get all tables and columns for relationships
+    const getTablesAndColumns = () => {
+        return new Promise((resolve, reject) => {
+            connection.query(
+                `SELECT TABLE_NAME, COLUMN_NAME 
+                 FROM INFORMATION_SCHEMA.COLUMNS 
+                 WHERE TABLE_SCHEMA = 'glpi'`,
+                (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results);
+                }
+            );
+        });
     };
 
-    // Generate all files
+    // Detect relationships
+    const detectRelationships = async () => {
+        const tablesAndColumns = await getTablesAndColumns();
+        const relationships = [];
+
+        for (let i = 0; i < tablesAndColumns.length; i++) {
+            const from = tablesAndColumns[i];
+            for (let j = 0; j < tablesAndColumns.length; j++) {
+                const to = tablesAndColumns[j];
+
+                // Skip self-joins
+                if (from.TABLE_NAME === to.TABLE_NAME) continue;
+
+                // Check for potential relationships (e.g., matching column names)
+                if (from.COLUMN_NAME === to.COLUMN_NAME || from.COLUMN_NAME.endsWith(`_${to.COLUMN_NAME}`)) {
+                    relationships.push({
+                        from: `${from.TABLE_NAME}.${from.COLUMN_NAME}`,
+                        to: `${to.TABLE_NAME}.${to.COLUMN_NAME}`
+                    });
+                }
+            }
+        }
+
+        return relationships;
+    };
+
+    // Generate and export all files
     const generateFiles = async () => {
         try {
             const tables = await getTables();
 
             // 1. table.txt: Table names
             const tableContent = tables.map(table => `- ${table}`).join('\n');
-            writeToFile(files.tableNames, tableContent);
+            fs.writeFileSync(files.tableNames, tableContent, 'utf8');
+            console.log(`File generated: ${files.tableNames}`);
 
             // 2. structure.txt: Table structures
             let structureContent = '';
@@ -74,11 +110,13 @@ connection.connect(err => {
                 });
                 structureContent += '\n';
             }
-            writeToFile(files.tableStructure, structureContent);
+            fs.writeFileSync(files.tableStructure, structureContent, 'utf8');
+            console.log(`File generated: ${files.tableStructure}`);
 
-            // 3. table.dbml: Table names in dbdiagram format
+            // 3. table_dbdiagram.dbml: Table names in dbdiagram format
             const tableDbmlContent = tables.map(table => `Table ${table} {}`).join('\n\n');
-            writeToFile(files.tableDbml, tableDbmlContent);
+            fs.writeFileSync(files.tableDbml, tableDbmlContent, 'utf8');
+            console.log(`File generated: ${files.tableDbml}`);
 
             // 4. structure_dbdiagram.dbml: Table structures in dbdiagram format
             let structureDbmlContent = '';
@@ -95,66 +133,39 @@ connection.connect(err => {
                 });
                 structureDbmlContent += '}\n\n';
             }
-            writeToFile(files.structureDbml, structureDbmlContent);
+            fs.writeFileSync(files.structureDbml, structureDbmlContent, 'utf8');
+            console.log(`File generated: ${files.structureDbml}`);
 
-            // 5. relation.txt: Table relationships in plain text
-            const relationships = await detectRelationships(tables);
+            // 5. relation.txt: Relationships in plain text
+            const relationships = await detectRelationships();
             let relationContent = '';
-            for (const table in relationships) {
+            const grouped = {};
+            relationships.forEach(rel => {
+                const [fromTable] = rel.from.split('.');
+                if (!grouped[fromTable]) grouped[fromTable] = [];
+                grouped[fromTable].push(`From: ${rel.from} -> To: ${rel.to}`);
+            });
+            for (const table in grouped) {
                 relationContent += `// Table: ${table}\n`;
-                relationships[table].forEach(rel => {
-                    relationContent += `From: ${rel.from} -> To: ${rel.to}\n`;
-                });
-                relationContent += '\n\n\n\n\n';
+                relationContent += grouped[table].join('\n') + '\n\n\n\n\n';
             }
-            writeToFile(files.relationText, relationContent);
+            fs.writeFileSync(files.relationText, relationContent, 'utf8');
+            console.log(`File generated: ${files.relationText}`);
 
-            // 6. relation_dbdiagram.dbml: Table relationships in dbdiagram format
+            // 6. relation_dbdiagram.dbml: Relationships in dbdiagram format
             let relationDbmlContent = '';
-            for (const table in relationships) {
-                relationships[table].forEach(rel => {
-                    const [fromTable, fromColumn] = rel.from.split('.');
-                    const [toTable, toColumn] = rel.to.split('.');
-                    relationDbmlContent += `Ref: ${fromTable}.${fromColumn} > ${toTable}.${toColumn}\n`;
-                });
-            }
-            writeToFile(files.relationDbml, relationDbmlContent);
+            relationships.forEach(rel => {
+                const [fromTable, fromColumn] = rel.from.split('.');
+                const [toTable, toColumn] = rel.to.split('.');
+                relationDbmlContent += `Ref: ${fromTable}.${fromColumn} > ${toTable}.${toColumn}\n`;
+            });
+            fs.writeFileSync(files.relationDbml, relationDbmlContent, 'utf8');
+            console.log(`File generated: ${files.relationDbml}`);
         } catch (err) {
             console.error('Error generating files:', err.message);
         } finally {
             connection.end();
         }
-    };
-
-    // Detect relationships
-    const detectRelationships = async (tables) => {
-        const relationships = {};
-        const tablesAndColumns = await Promise.all(
-            tables.map(async table => ({
-                table,
-                columns: (await getTableStructure(table)).map(col => col.Field),
-            }))
-        );
-
-        for (const table of tables) {
-            relationships[table] = [];
-            const currentTableColumns = tablesAndColumns.find(tc => tc.table === table).columns;
-
-            for (const other of tablesAndColumns) {
-                if (table === other.table) continue;
-
-                currentTableColumns.forEach(column => {
-                    if (other.columns.includes(column)) {
-                        relationships[table].push({
-                            from: `${table}.${column}`,
-                            to: `${other.table}.${column}`,
-                        });
-                    }
-                });
-            }
-        }
-
-        return relationships;
     };
 
     generateFiles();

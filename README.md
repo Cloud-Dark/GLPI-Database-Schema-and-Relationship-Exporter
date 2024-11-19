@@ -1,0 +1,1 @@
+# GLPI-Database-Schema-and-Relationship-Exporter
